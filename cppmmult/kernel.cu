@@ -1,6 +1,7 @@
 /* Adapted from Robert Hochberg, created almost entirely from the CUDA C programming guide*/
+// https://www.shodor.org/media/content/petascale/materials/UPModules/matrixMultiplication/moduleDocument.pdf
 // Concluded on 20th April, 2018
-//This hopes to be the C++ version
+//This hopes to be the C++ version of mostly the client side
 // This code will do parallel MCMC
 
 #include <iostream>
@@ -9,11 +10,15 @@
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 #include <math.h>
+#include <ctime>
+#include <random> // for c++11 random number generation on host
 #include <cstdio>
 #include <cstdlib> // for min/max
 #include <curand_kernel.h> // random number
+#include <device_functions.h>
 
-#define BLOCK_SIZE 2 // size or dimension of the matrix per se
+#define BLOCK_SIZE 256 // size or dimension of the matrix per se
+#define NLOOP 1000000 // size or dimension of the matrix per se
 using namespace std;
 
 // error return code
@@ -45,90 +50,137 @@ inline void gpuAssert(cudaError_t code, char *file, int line, bool abort = true)
 
 //declaring matrix structure
 
-typedef struct {
-	int width;
-	int height;
-	float* elements;
-}Matrix;
-
 // DEVICE CODE
 
-// matrix multiplication kernel prototype
-__global__ void MatMulKernel(const Matrix, const Matrix, Matrix);
-
 // random number kernels 
-//seed
-__device__ void init(float seed, curandState_t* states) { // 'states' is the state of the system in time 
+//seed is now called in the rndn, uncomment below to call seed separately
+//__global__ void init(float seed, curandState_t* states) { // 'states' is the state of the system in time 
+//
+//	int iid = blockDim.x * blockIdx.x + threadIdx.x;
+//
+//	curand_init(seed, iid, 0, &states[iid]);
+//}
+
+//random number kernel for device function
+__device__ float* rndn (float* nrdn,  curandState_t* states) { // pointer returning function ^___^
 
 	int iid = blockDim.x * blockIdx.x + threadIdx.x;
-	curand_init(seed, iid, 0, &states[iid]);
+	
+		curand_init(clock(), iid, 0, &states[iid]); //same seed for each thread, to avoid passing seed from outside
+		curandState_t localState = states[iid]; // copy to local memory
+		nrdn[iid] = curand_uniform(&localState);
+	 // generates random number
+		states[iid] = localState;
+	// to refresh the generator state
+	return nrdn;
 }
+//__global__ void setrnkernels(float* _ptr, curandState* globalState, const unsigned int _points)
+//{
+//	int idx = blockIdx.x*blockDim.x + threadIdx.x;
+//	//only call gen on the kernels we have inited
+//	//(one per device container element)
+//	if (idx < _points)
+//	{
+//		_ptr[idx] = rndno(globalState, idx);
+//	}
+//}
+
+
+
+//__global__ void init(float seed, curandState_t* states) { // 'states' is the state of the system in time 
+//
+//	int iid = blockDim.x * blockIdx.x + threadIdx.x;
+//	curand_init(seed, iid, 0, &states[iid]);
+//}
 //random number kernel
-__device__ float rndn(float* no, curandState_t* states) { // you can change the data type to unsigned int to give +ve numbers only
-
-	int iid = blockDim.x * blockIdx.x + threadIdx.x;
-	curandState_t localState = states[iid]; // copy to local memory
-	for (int n = 0; n < BLOCK_SIZE; n++) {
-		//float rno = curand_uniform(&localState);     
-		return no[iid] = curand_uniform(&localState);
-	}
-	states[iid] = localState; // to refresh the generator state
-	return no[iid];
-}
-
+//__global__ void rndn (float* no, curandState_t* states) { // you can change the data type to unsigned int to give +ve numbers only
+//
+//	int iid = blockDim.x * blockIdx.x + threadIdx.x;
+//	//curand_init((float)clock(), iid, 0, &states[iid]); //seed
+//	curandState_t localState = states[iid]; // copy to local memory
+//	for (int n = 0; n < BLOCK_SIZE; n++) {
+//		//float rno = curand_uniform(&localState);     
+//		no[iid] = curand_uniform(&localState);
+//	}
+//	states[iid] = localState; // to refresh the generator state
+//	
+//}
 // Matrix multiplication kernel function definition for device
 // device function to check matrix size
-__device__ void checkmatrixsize(Matrix A, Matrix B, Matrix C) {
+//__device__ void checkmatrixsize(Matrix A, Matrix B, Matrix C) {
+//
+//	if (A.width != B.height)
+//
+//		printf("Your matrix dimension cannot be multiplied, Please check your inputs and try again");
+//
+//	else if (A.width == B.height)
+//
+//		printf(" Your matrix dimension match and can be multiplied, you are good to go! ");
+//		
+//}
+__global__ void MatMulKernel( float* d_A, const int lda,  float* d_B, float* d_C) {
+	
 
-	if (A.width != B.height)
-
-		printf("Your matrix dimension cannot be multiplied, Please check your inputs and try again");
-
-	else if (A.width == B.height)
-
-		printf(" Your matrix dimension match and can be multiplied, you are good to go! ");
-		
-}
-__global__ void MatMulKernel(Matrix A, Matrix B, Matrix C) {
+	//lda = leading dimension of A
+	
 	// Each thread computes one element of C
-	// by accumulating results into Cvalue
-	
-	curandState_t* seedgen;// for the seed and the rando number generation
-	float seed; // for the initi function
-	float* d_rn; // for the random numbers
-	curandState* rngen;
-	
-	init(seed,  seedgen);
-	rndn(d_rn, rngen); // try using same curandState* in seed for rndn
-
-
-
-	float Cvalue = 0.0;
-	
-	int row = blockIdx.y * blockDim.y + threadIdx.y;
-	int col = blockIdx.x * blockDim.x + threadIdx.x;
-	if (row > A.height || col > B.width) return;
-	//or
-	if (row < BLOCK_SIZE && col < BLOCK_SIZE)
-		//or
-	checkmatrixsize;// this calls the device function defined above
 		
-	for (int e = 0; e < A.width; ++e) {
-		(A.elements[row * A.width + e]) = d_rn[A.width * A.height]; // putting the random bumber in A.elements
-		(B.elements[e * B.width + col]) = d_rn[B.width * B.height]; // putting the random number in B.elements
-			Cvalue += (A.elements[row * A.width + e]) * (B.elements[e * B.width + col]);
-		}
+	//thread id
+	int eleidx = threadIdx.x;
+	int blockidx = blockIdx.x;
+	int blockdimx = blockDim.x;
+	int blockidy = blockIdx.y;
+
+	//shared memory
+	extern __shared__ float temp[]; // temporary array for reduction
+	
+	float Cvalue = 0.0;
+	curandState_t* rn;
+	//shared memory (reduction method) for matrix A and B
+	d_A = rndn(d_A, rn);
+	d_B = rndn(d_B, rn ); // putting the random numbers in d_B
+
+	temp[eleidx] = d_A[blockidy * lda + blockidx * blockdimx + eleidx] * d_B[blockidx * blockdimx + eleidx];
+
 	__syncthreads();
-	C.elements[row * C.width + col] = Cvalue;
+
+	//do reduction in shared memory (adapted from udacity class, lecture 3 code snippet)
+	for (unsigned int i = blockDim.x / 2; i > 0; i = i/2) { // this reduces threadblock by half untill the calculation is done
+		
+		if (eleidx < i) {
+			temp[eleidx] = temp[eleidx] + temp[eleidx + i];
+		}
+		__syncthreads();
+		
+	}
+
+	// atomically write result back to global memory using thread 0
+	if (eleidx == 0){
+		//float input = temp[0];
+		//float rslt = d_C[blockidy];
+		atomicAdd( &d_C[blockidy], temp[0]);
+	}
+	Cvalue = d_C[blockidy];
+	// print out d_C
+
+	printf("the values of C are: ", Cvalue);
+
+
+
 }
 
 
 // HOST CODE
 
 // Matrix dimensions are assumed to be multiples of BLOCK_SIZE
-void MatMul(const Matrix A, const Matrix B, Matrix C) {
-	
-	// uncomment below if you dont want to use the curand device api for the multiplication thus you must also adjust the client side
+//MatMul(Tele, Twidth, Theight, Sele, Swidth, Sheight, Rele, Rwidth, Rheight); //kernel
+
+void MatMul(const float* A, const int Aw, const int Ah, const float* B, const int Bw, const int Bh, float* C, const int Cw, const int Ch) {
+	//0. common variable
+	dim3 dimBlock, dimGrid;
+
+	//1. allocate device memory
+	// uncomment below and also the cudaMemcpyHosttoDevice if you dont want to use the curand device api for the multiplication thus you must also adjust the client side
 	/*
 	// seed random number
 	curandState_t* rn;
@@ -148,119 +200,145 @@ void MatMul(const Matrix A, const Matrix B, Matrix C) {
 	//gpuErrchk(cudaMemcpy(h_rn, d_rn, N * sizeof(float), cudaMemcpyDeviceToHost));
 	*/
 	// ALLOCATE & COPY A, B & C to device memory
-	Matrix d_A;
-	d_A.width = A.width;
-	d_A.height = A.height;
-	size_t size = A.width * A.height * BLOCK_SIZE * sizeof(float);
-	gpuErrchk(cudaMalloc((void**)&d_A.elements, size));
-	//copy A to device. declare A.elements in client side
-	gpuErrchk(cudaMemcpy(d_A.elements, A.elements, size, cudaMemcpyHostToDevice));
-	Matrix d_B;
-	d_B.width = B.width;
-	d_B.height = B.height;
-	size = B.width * B.height * BLOCK_SIZE * sizeof(float);
-	gpuErrchk(cudaMalloc((void**)&d_B.elements, size));
-	//copy B to device. declare B.elements in clients side
-	gpuErrchk(cudaMemcpy(d_B.elements, B.elements, size, cudaMemcpyHostToDevice));
-	// Allocate C in device memory
-	Matrix d_C;
-	d_C.width = C.width;
-	d_C.height = C.height;
-	size = C.width * C.height * sizeof(float);
-	gpuErrchk(cudaMalloc((void**)&d_C.elements, size));
+	size_t size;
+	float *d_A,*d_B,*d_C; //Transition matrix (initial state is given)
+	
+	size = Aw * Ah * sizeof(float);
+	gpuErrchk(cudaMalloc((void**)&d_A, size));
+	gpuErrchk(cudaMemcpy(d_A, A, size, cudaMemcpyHostToDevice));
 
-	//invoke kernel
-	dim3 dimBlock(BLOCK_SIZE, BLOCK_SIZE);
-	dim3 dimGrid((B.width + dimBlock.x - 1) / dimBlock.x,
-		(A.height + dimBlock.y - 1) / dimBlock.y);
-	MatMulKernel <<< dimGrid, dimBlock >> > (d_A, d_B, d_C);
-	gpuErrchk(cudaThreadSynchronize());
-	// Read C from device memory
-	gpuErrchk(cudaMemcpy(C.elements, d_C.elements, size, cudaMemcpyDeviceToHost));
+	size = Bw * Bh * sizeof(float);
+	gpuErrchk(cudaMalloc((void**)&d_B, size));
+	//gpuErrchk(cudaMemcpy(d_B, B, size, cudaMemcpyHostToDevice));
+
+	size = Cw * Ch * sizeof(float);
+	gpuErrchk(cudaMalloc((void**)&d_C, size));
+
+		
+	// the probability of being a state is obtained by determining the probability of being a state and minus 1
+		
+
+	/*dimBlock.x = BLOCK_SIZE; dimBlock.y = 1; dimBlock.z = 1;
+	dimGrid.x = (Bw / dimBlock.x) + 1; dimGrid.y = Bh; dimGrid.z = 1;
+	init <<< dimGrid, dimBlock >> > (d_B, rngen); */
+
+	// declare a state, a seed, a generator, create Bh random number inside d_B;
+
+
+
+	cout << "finished allocating device memory and copying, now launching the MatMultKernel on device. . . \n\n";
+
+
+	//3. invoke kernel
+	dimBlock.x = BLOCK_SIZE; dimBlock.y = 1; dimBlock.z = 1;
+	dimGrid.x = (Aw/ dimBlock.x)+1; dimGrid.y = Ah; dimGrid.z = 1; //Ah = Bh = Ch, Aw, Bw = Cw = 1
+	for (int i = 0; i < NLOOP; i++) {
+		MatMulKernel <<< dimGrid, 1000, dimBlock.x >>> (d_A, Aw, d_B, d_C);
+		gpuErrchk(cudaMemcpy(d_B, d_C, size, cudaMemcpyDeviceToDevice));// this should be repeated for the nmatix number of times
+	}
+
+	//4. Read C from device memory
+	gpuErrchk(cudaMemcpy(C, d_C, size, cudaMemcpyDeviceToHost));
+	
+	//5. Cleanup
 	// free memory
-	cudaFree(d_A.elements);
-	cudaFree(d_B.elements);
-	cudaFree(d_C.elements);
-	//cudaFree(d_rn);
+	cudaFree(d_A);
+	cudaFree(d_B);
+	cudaFree(d_C);
+	//cudaFree(rngen);
 }
 
 //CLIENT SIDE
 
 int main(int argc, char* argv[]) {
-	// generate random numbers to pour into matrix elements
+	
+	//parameters
+	//int nstatus = 8192; //16384 is limit for GT650M
+	//float deltat = (float)1 / 12; // 1 week
+	//float pf = (float)0.01; // 1 year
+	//float totaltime = 5; // 10 years
+	//int nsim = 16384;
+	//int nsteps = (int)(totaltime / deltat);
 
-	//curandGenerator_t gen;
-	//curandSetPseudoRandomGeneratorSeed (gen, 1234ULL);
-	Matrix T, S, R; //T = transition, S= status, R = resultant
-	// get the sizes of the matrix
-
+	//1. PREPROCESSING
+	//float *Tele, *Sele, *Rele; //T = transition, S= status, R = resultant
 	int tH, tW, sH, sW, rH, rW; // width and height of the T & S matrices
-	tH = BLOCK_SIZE; /* Height of transtion matrix */
-	tW = BLOCK_SIZE; /* Width of transtion matrix */
+						
+	
+	tH = 10; /* Height of transtion matrix */
+	tW = 10; /* Width of transtion matrix */
+	int Theight = tH;
+	int Twidth = tW;
+	float* Tele = (float*)malloc(Twidth * Theight * sizeof(float)); // memory on heap
+
 	sH = tW; /* Height of status vector */
-	sW = 1; // check this!! it is the width of the status vector
+	sW = 10; // check this!! it is the width of the status vector
+	int Sheight = sH;
+	int Swidth = 10;
+	float* Sele = (float*)malloc(Swidth * Sheight * sizeof(float));
+	
 	rH = tH;
-	rW = 0;
-	for (int w = 0; w < BLOCK_SIZE; w++)
-	{
-		rW += tW * sH;
-	}
-
-
-	T.height = tH;
-	T.width = tW;
-	S.height = sH;
-	S.width = sW;
-	R.width = rW;
-	R.height = rH;
+	rW = tW;
+	int Rwidth = rW;
+	int Rheight = rH;
+	float* Rele = (float*)malloc(Rwidth * Rheight * sizeof(float));
 
 	//elements
+	cout << "allocating memory in host to contain the device's transfer . . . \n";
+	// generate host random number to fill the T, S and R elements created with "new"
+	//float seed = time(0);
+	//mt19937_64 h_rn(seed); // or any engine u choose like "random_device"
+	//	
 
-	T.elements = new float[T.width * T.height * sizeof(float)];
-	S.elements = new float[S.width * S.height * sizeof(float)];
-	R.elements = new float[R.width * R.height * sizeof(float)];
+	// initialize the contents of the elements with the random numbers, this tells how they are aranged
 
-	// initialize the contents of the elements, this tells how they are aranged
+	for (int i = 0; i < Theight; i++) {
+		for (int j = 0; j < Twidth; j++) {
 
-	for (int i = 0; i < T.height; i++) {
-		for (int j = 0; j < T.width; j++) {
-
-			T.elements[i * T.width + j]; // add the random numbers here if error occurs
+			Tele[i * Twidth + j] = rand();// = h_rn(); // add the random numbers here if error occurs
 		}
 	}
-	for (int i = 0; i < S.height; i++) {
-		for (int j = 0; j < S.width; j++) {
-			S.elements[i * S.width + j]; // add the random numbers here if error occurs
-		}
-	}
+	
+	//2. WORKHORSE
 	// call the Host function
 
-	MatMul(T, S, R);
+	MatMul(Tele, Twidth, Theight, Sele, Swidth, Sheight, Rele, Rwidth, Rheight); //kernel
 
-
+	//3. POSTPROCESSING
 	// print the 5 x 5 portion of the T, S and R matrices
-	for (int i = 0; i < __min(5, T.height); i++) { //__min() is used because min() did not work, the former is a c++ macro while the later is a c macro 
-		for (int j = 0; j < __min(5, T.width); j++) {
-			cout << " Transtion elements are: \n" << endl;
-			cout << T.elements[i * T.width + j] << endl;
-		}
-	}
-	cout << "\n" << endl;
-
-	for (int i = 0; i < __min(5, S.height); i++) { //__min() is used because min() did not work, the former is a c++ macro while the later is a c macro 
-		for (int j = 0; j < __min(5, S.width); j++) {
-			cout << " Status vector elements are: \n" << endl;
-			cout << S.elements[i * S.width + j] << endl;
-		}
-	}
-	cout << "\n" << endl;
-
-	for (int i = 0; i < __min(5, R.height); i++) { //__min() is used because min() did not work, the former is a c++ macro while the later is a c macro 
-		for (int j = 0; j < __min(5, R.width); j++) {
-			cout << " Resultant elements are: \n" << endl;
-			cout << R.elements[i * R.width + j] << endl;
+	for (int i = 0; i < __min(5, Theight); i++) { //__min() is used because min() did not work, the former is a c++ macro while the later is a c macro 
+		for (int j = 0; j < __min(5, Twidth); j++) {
+			
+			cout << " Transtion elements are: \n" << Tele[i * Twidth + j] << endl;
 		}
 	}
 	cout << "\n" << endl;
 	
+
+	for (int i = 0; i < __min(5, Sheight); i++) { //__min() is used because min() did not work, the former is a c++ macro while the later is a c macro 
+		for (int j = 0; j < __min(5, Swidth); j++) {
+			
+			cout << " Status vector elements are: \n" << Sele[i * Swidth + j] << endl;
+		}
+	}
+	cout << "\n" << endl;
+
+	for (int i = 0; i < __min(5, Rheight); i++) { //__min() is used because min() did not work, the former is a c++ macro while the later is a c macro 
+		for (int j = 0; j < __min(5, Rwidth); j++) {
+			
+			cout << " Resultant elements are: \n" << Rele[i * Rwidth + j] << endl;
+		}
+	}
+	cout << "\n" << endl;
+
+	// free memory
+	free(Tele);
+	
+	free(Sele);
+	
+	free(Rele);
+	
+	cin.get();
+
+	return 0;
 }
