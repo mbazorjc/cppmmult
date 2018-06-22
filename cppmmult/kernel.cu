@@ -3,6 +3,9 @@
 // Concluded on 20th April, 2018
 //This hopes to be the C++ version of mostly the client side
 // This code will do parallel MCMC
+// https://www.youtube.com/watch?v=aZhaYO_cV6I // for main arguements
+// to copy the transtion txt file from another directroy to this project output directory
+
 
 #include <iostream>
 #include <stdio.h>
@@ -16,9 +19,12 @@
 #include <cstdlib> // for min/max
 #include <curand_kernel.h> // random number
 #include <device_functions.h>
+#include <time.h>
+#include <fstream>
+#include <string>
 
 #define BLOCK_SIZE 256 // size or dimension of the matrix per se
-#define NLOOP 1000000 // size or dimension of the matrix per se
+
 using namespace std;
 
 // error return code
@@ -62,7 +68,7 @@ inline void gpuAssert(cudaError_t code, char *file, int line, bool abort = true)
 //}
 
 //random number kernel for device function
-__device__ float* rndn (float* nrdn,  curandState_t* states) { // pointer returning function ^___^
+__device__ float rndn (float* nrdn,  curandState_t* states) { // pointer returning function ^___^
 
 	int iid = blockDim.x * blockIdx.x + threadIdx.x;
 	
@@ -72,7 +78,7 @@ __device__ float* rndn (float* nrdn,  curandState_t* states) { // pointer return
 	 // generates random number
 		states[iid] = localState;
 	// to refresh the generator state
-	return nrdn;
+	return nrdn[iid];
 }
 //__global__ void setrnkernels(float* _ptr, curandState* globalState, const unsigned int _points)
 //{
@@ -118,7 +124,7 @@ __device__ float* rndn (float* nrdn,  curandState_t* states) { // pointer return
 //		printf(" Your matrix dimension match and can be multiplied, you are good to go! ");
 //		
 //}
-__global__ void MatMulKernel( float* d_A, const int lda,  float* d_B, float* d_C) {
+__global__ void gMatMulKernel( const float* d_A, const int lda,  float* d_B, float* d_C) {
 	
 
 	//lda = leading dimension of A
@@ -126,29 +132,28 @@ __global__ void MatMulKernel( float* d_A, const int lda,  float* d_B, float* d_C
 	// Each thread computes one element of C
 		
 	//thread id
-	int eleidx = threadIdx.x;
-	int blockidx = blockIdx.x;
-	int blockdimx = blockDim.x;
-	int blockidy = blockIdx.y;
+	unsigned int eleidx = threadIdx.x;
+	unsigned int blockidx = blockIdx.x;
+	unsigned int blockdimx = blockDim.x;
+	unsigned int blockidy = blockIdx.y;
 
 	//shared memory
-	extern __shared__ float temp[]; // temporary array for reduction
+	extern __shared__ float temp_sh[]; // temporary array for reduction
 	
-	float Cvalue = 0.0;
-	curandState_t* rn;
+	//curandState_t* rn;
 	//shared memory (reduction method) for matrix A and B
-	d_A = rndn(d_A, rn);
-	d_B = rndn(d_B, rn ); // putting the random numbers in d_B
-
-	temp[eleidx] = d_A[blockidy * lda + blockidx * blockdimx + eleidx] * d_B[blockidx * blockdimx + eleidx];
-
+	//d_A = rndn(d_A, rn);
+	//d_B = rndn(d_B, rn ); // putting the random numbers in d_B
+	if ( (blockidx * blockdimx + eleidx) < lda) {
+		temp_sh[eleidx] = d_A[blockidy * lda + blockidx * blockdimx + eleidx] * d_B[blockidx * blockdimx + eleidx];
+	}
 	__syncthreads();
 
 	//do reduction in shared memory (adapted from udacity class, lecture 3 code snippet)
 	for (unsigned int i = blockDim.x / 2; i > 0; i = i/2) { // this reduces threadblock by half untill the calculation is done
 		
 		if (eleidx < i) {
-			temp[eleidx] = temp[eleidx] + temp[eleidx + i];
+			temp_sh[eleidx] = temp_sh[eleidx] + temp_sh[eleidx + i];
 		}
 		__syncthreads();
 		
@@ -158,87 +163,108 @@ __global__ void MatMulKernel( float* d_A, const int lda,  float* d_B, float* d_C
 	if (eleidx == 0){
 		//float input = temp[0];
 		//float rslt = d_C[blockidy];
-		atomicAdd( &d_C[blockidy], temp[0]);
+		atomicAdd( &d_C[blockidy], temp_sh[0]);
 	}
-	Cvalue = d_C[blockidy];
 	// print out d_C
+	//float Cvalue = d_C[blockidy];
+	//printf("the values of C are: ", Cvalue);
+	}
 
-	printf("the values of C are: ", Cvalue);
+//set initial B
+//	gSetInitialVector <<< dimGrid, dimBlock, dimBlock.x >>> (d_B, Bh, value);
+__global__ void gSetInitialVector(float* d_B, const int Bh, const float value)
+{
+	//thread id
+	int eleidx = threadIdx.x;
+	int blockidx = blockIdx.x;
+	int blockdimx = blockDim.x;
 
+	//set the value of B
+	if (blockidx * blockdimx + eleidx < Bh) {
+		d_B[blockidx * blockdimx + eleidx] = value;
+	}
 
+	//done
 
 }
-
 
 // HOST CODE
 
 // Matrix dimensions are assumed to be multiples of BLOCK_SIZE
-//MatMul(Tele, Twidth, Theight, Sele, Swidth, Sheight, Rele, Rwidth, Rheight); //kernel
-
-void MatMul(const float* A, const int Aw, const int Ah, const float* B, const int Bw, const int Bh, float* C, const int Cw, const int Ch) {
+// MatMul(tele, tw, th, sele, sh, rele, rh, nloop); //kernel
+void MatMul(const float* Aele, const int Aw, const int Ah, float* Bele, const int Bh, float* Cele, const int Ch, const unsigned int nloop) {
 	//0. common variable
 	dim3 dimBlock, dimGrid;
 
 	//1. allocate device memory
-	// uncomment below and also the cudaMemcpyHosttoDevice if you dont want to use the curand device api for the multiplication thus you must also adjust the client side
-	/*
-	// seed random number
-	curandState_t* rn;
-	float h_rn;
-	float* d_rn;
 
-	gpuErrchk(cudaMalloc((void**)&rn, BLOCK_SIZE * sizeof(curandState_t)));
-	gpuErrchk(cudaMalloc((void**)&d_rn, BLOCK_SIZE * sizeof(float)));
-	
-	init << < dimGrid, dimBlock >> > (time(0), rn); // seed
-//invoke kernel to launch the random numbers 
-	dim3 dimBlock(BLOCK_SIZE, BLOCK_SIZE);
-	dim3 dimGrid((B.width + dimBlock.x - 1) / dimBlock.x,
-		(A.height + dimBlock.y - 1) / dimBlock.y);
-	rndn << <  dimGrid, dimBlock >> > (d_rn, rn);
-
-	//gpuErrchk(cudaMemcpy(h_rn, d_rn, N * sizeof(float), cudaMemcpyDeviceToHost));
-	*/
 	// ALLOCATE & COPY A, B & C to device memory
 	size_t size;
 	float *d_A,*d_B,*d_C; //Transition matrix (initial state is given)
 	
-	size = Aw * Ah * sizeof(float);
-	gpuErrchk(cudaMalloc((void**)&d_A, size));
-	gpuErrchk(cudaMemcpy(d_A, A, size, cudaMemcpyHostToDevice));
+	//transition matrix
+	gpuErrchk(cudaMalloc((void**)&d_A, sizeof(float) * Aw * Ah ));
+	
 
-	size = Bw * Bh * sizeof(float);
+	//input state (state t-1)
+	size = Bh * sizeof(float);
 	gpuErrchk(cudaMalloc((void**)&d_B, size));
-	//gpuErrchk(cudaMemcpy(d_B, B, size, cudaMemcpyHostToDevice));
 
-	size = Cw * Ch * sizeof(float);
+	//output vector (state t)
+	size = Ch * sizeof(float);
 	gpuErrchk(cudaMalloc((void**)&d_C, size));
 
-		
-	// the probability of being a state is obtained by determining the probability of being a state and minus 1
-		
-
-	/*dimBlock.x = BLOCK_SIZE; dimBlock.y = 1; dimBlock.z = 1;
-	dimGrid.x = (Bw / dimBlock.x) + 1; dimGrid.y = Bh; dimGrid.z = 1;
-	init <<< dimGrid, dimBlock >> > (d_B, rngen); */
-
-	// declare a state, a seed, a generator, create Bh random number inside d_B;
+	//2. copy transition matrix and initialize the state vector at t = 0 to random number
+	// to be loaded from file
+	size = Aw * Ah * sizeof(float);
+	gpuErrchk(cudaMemcpy(d_A, Aele, size, cudaMemcpyHostToDevice));
+	// load transtion matrix from file
 
 
+	//workaround for starting position
+	size = Bh * sizeof(float);
+	const float initb = 0.5;
+	dimBlock.x = BLOCK_SIZE; dimBlock.y = 1; dimBlock.z = 1;
+	dimGrid.x = (Bh / dimBlock.x) + 1; dimGrid.y = 1; dimGrid.z = 1;
+	gSetInitialVector <<< dimGrid, dimBlock >>> (d_B, Bh, initb);
 
+	gpuErrchk( cudaMemcpy(Bele, d_B, size, cudaMemcpyDeviceToHost) );
+
+	// random number allocation for B (to be fix later)
+	/*curandState_t* rn;
+	float h_rn;
+	float* d_rn;
+	gpuErrchk(cudaMalloc((void**)&rn, BLOCK_SIZE * sizeof(curandState_t)));
+	gpuErrchk(cudaMalloc((void**)&d_rn, BLOCK_SIZE * sizeof(float)));
+	init << < dimGrid, dimBlock >> > (time(0), rn); // seed
+	//invoke kernel to launch the random numbers 
+	dim3 dimBlock(BLOCK_SIZE, BLOCK_SIZE);
+	dim3 dimGrid((B.width + dimBlock.x - 1) / dimBlock.x,
+	(A.height + dimBlock.y - 1) / dimBlock.y);
+	rndn << <  dimGrid, dimBlock >> > (d_rn, rn);
+	//gpuErrchk(cudaMemcpy(h_rn, d_rn, N * sizeof(float), cudaMemcpyDeviceToHost));*/
 	cout << "finished allocating device memory and copying, now launching the MatMultKernel on device. . . \n\n";
 
 
 	//3. invoke kernel
 	dimBlock.x = BLOCK_SIZE; dimBlock.y = 1; dimBlock.z = 1;
-	dimGrid.x = (Aw/ dimBlock.x)+1; dimGrid.y = Ah; dimGrid.z = 1; //Ah = Bh = Ch, Aw, Bw = Cw = 1
-	for (int i = 0; i < NLOOP; i++) {
-		MatMulKernel <<< dimGrid, 1000, dimBlock.x >>> (d_A, Aw, d_B, d_C);
-		gpuErrchk(cudaMemcpy(d_B, d_C, size, cudaMemcpyDeviceToDevice));// this should be repeated for the nmatix number of times
+	dimGrid.x = (Aw / dimBlock.x)+1; dimGrid.y = Ah; dimGrid.z = 1; //Ah = Bh = Ch, Aw, Bw = Cw = 1
+
+	cout << dimBlock.x << "," << dimBlock.y << "," << dimBlock.z << endl;
+	cout << dimGrid.x << "," << dimGrid.y << "," << dimGrid.z << endl;
+
+
+	for (int i = 0; i < nloop/2; i++) {
+		//cout << "," << i;
+		gMatMulKernel <<< dimGrid, dimBlock, ( dimBlock.x *sizeof(float) ) >>> (d_A, Aw, d_B, d_C);
+		gMatMulKernel <<< dimGrid, dimBlock,( dimBlock.x * sizeof(float) ) >>> (d_A, Aw, d_C, d_B);
+
+		//gpuErrchk(cudaMemcpy(d_B, d_C, sizeof(float)*Bh, cudaMemcpyDeviceToDevice));// this should be repeated for the nmatix number of times
 	}
+	cout << endl;
 
 	//4. Read C from device memory
-	gpuErrchk(cudaMemcpy(C, d_C, size, cudaMemcpyDeviceToHost));
+	gpuErrchk( cudaMemcpy(Cele, d_B, sizeof(float)*Ch , cudaMemcpyDeviceToHost));
 	
 	//5. Cleanup
 	// free memory
@@ -259,85 +285,97 @@ int main(int argc, char* argv[]) {
 	//float totaltime = 5; // 10 years
 	//int nsim = 16384;
 	//int nsteps = (int)(totaltime / deltat);
+	
+	//float *Tele, *Sele, *Rele; //T = transition, S= status, R = resultant
+	const unsigned int nloop = 1000; // number of loop
+	const unsigned int th = 3000; //number of row
+	const unsigned int tw = th; //number of column
+	const unsigned int sh = th; //number of row
+	const unsigned int rh = th; //number of row
 
 	//1. PREPROCESSING
-	//float *Tele, *Sele, *Rele; //T = transition, S= status, R = resultant
-	int tH, tW, sH, sW, rH, rW; // width and height of the T & S matrices
-						
-	
-	tH = 10; /* Height of transtion matrix */
-	tW = 10; /* Width of transtion matrix */
-	int Theight = tH;
-	int Twidth = tW;
-	float* Tele = (float*)malloc(Twidth * Theight * sizeof(float)); // memory on heap
-
-	sH = tW; /* Height of status vector */
-	sW = 10; // check this!! it is the width of the status vector
-	int Sheight = sH;
-	int Swidth = 10;
-	float* Sele = (float*)malloc(Swidth * Sheight * sizeof(float));
-	
-	rH = tH;
-	rW = tW;
-	int Rwidth = rW;
-	int Rheight = rH;
-	float* Rele = (float*)malloc(Rwidth * Rheight * sizeof(float));
+	float *tele, *sele, *rele;
+	gpuErrchk(cudaHostAlloc((void**)&tele, sizeof(float)*th * tw, cudaHostAllocDefault));
+	gpuErrchk(cudaHostAlloc((void**)&sele, sizeof(float)*sh * 1, cudaHostAllocDefault));
+	gpuErrchk(cudaHostAlloc((void**)&rele, sizeof(float)*rh * 1, cudaHostAllocDefault));
 
 	//elements
-	cout << "allocating memory in host to contain the device's transfer . . . \n";
+	cout << "allocating memory in host. . . \n";
 	// generate host random number to fill the T, S and R elements created with "new"
 	//float seed = time(0);
 	//mt19937_64 h_rn(seed); // or any engine u choose like "random_device"
 	//	
 
 	// initialize the contents of the elements with the random numbers, this tells how they are aranged
-
-	for (int i = 0; i < Theight; i++) {
-		for (int j = 0; j < Twidth; j++) {
-
-			Tele[i * Twidth + j] = rand();// = h_rn(); // add the random numbers here if error occurs
-		}
+	// later the transition matrix must be loaded from a file based on the system blueprint.
+	random_device gen;
+	default_random_engine(time(0));
+	uniform_real_distribution<float> rn(0.0, 1.0);
+	
+	//test
+	if (argc != 2) {
+		cout << "not enough arguements\n";
+		cin.get();
+		return 1;
 	}
+
+	cout << "now taking the transtion matrix parameters from file" << endl;
+	//for (int i = 0; i < th; i++) {
+	//	for (int j = 0; j < tw; j++) {
+	//		tele[i * tw + j] = rn(gen); // add the random numbers here if error occurs
+
+			ifstream infile(argv[1]); // from the txt file
+
+			//test
+			if (!infile.good()) {
+				cout << "file read error on: " << argv[1] << endl;
+				cin.get();
+				return 1;
+			}
+			// read line by line the file
+			while (!infile.eof()) {
+				string data;
+				getline(infile, data);
+				cout << data << endl;
+			}
+			cout << endl;
+	
+	
+
+	// ok
 	
 	//2. WORKHORSE
 	// call the Host function
 
-	MatMul(Tele, Twidth, Theight, Sele, Swidth, Sheight, Rele, Rwidth, Rheight); //kernel
+	MatMul(tele, tw, th, sele, sh, rele, rh, nloop); //kernel
 
 	//3. POSTPROCESSING
 	// print the 5 x 5 portion of the T, S and R matrices
-	for (int i = 0; i < __min(5, Theight); i++) { //__min() is used because min() did not work, the former is a c++ macro while the later is a c macro 
-		for (int j = 0; j < __min(5, Twidth); j++) {
-			
-			cout << " Transtion elements are: \n" << Tele[i * Twidth + j] << endl;
+	cout << " Transition elements are: ";
+	for (int i = 0; i < __min(5, th); i++) { //__min() is used because min() did not work, the former is a c++ macro while the later is a c macro 
+		for (int j = 0; j < __min(5, tw); j++) {
+			cout << tele[i * tw + j] << " , ";
 		}
+		cout << endl;
 	}
-	cout << "\n" << endl;
+	cout << endl;
 	
-
-	for (int i = 0; i < __min(5, Sheight); i++) { //__min() is used because min() did not work, the former is a c++ macro while the later is a c macro 
-		for (int j = 0; j < __min(5, Swidth); j++) {
-			
-			cout << " Status vector elements are: \n" << Sele[i * Swidth + j] << endl;
-		}
+	cout << " Status vector elements are: ";
+	for (int i = 0; i < __min(5, sh); i++) { //__min() is used because min() did not work, the former is a c++ macro while the later is a c macro 
+		 cout << sele[i] << " , ";
 	}
-	cout << "\n" << endl;
+	cout << endl;
 
-	for (int i = 0; i < __min(5, Rheight); i++) { //__min() is used because min() did not work, the former is a c++ macro while the later is a c macro 
-		for (int j = 0; j < __min(5, Rwidth); j++) {
-			
-			cout << " Resultant elements are: \n" << Rele[i * Rwidth + j] << endl;
-		}
+	cout << " Resultant elements are: ";
+	for (int i = 0; i < __min(5, rh); i++) { //__min() is used because min() did not work, the former is a c++ macro while the later is a c macro 
+			cout << rele[i] << " , ";
 	}
-	cout << "\n" << endl;
+	cout << endl;
 
 	// free memory
-	free(Tele);
-	
-	free(Sele);
-	
-	free(Rele);
-	
+	gpuErrchk( cudaFreeHost(tele) );
+	gpuErrchk( cudaFreeHost(sele) );
+	gpuErrchk( cudaFreeHost(rele) );
 	cin.get();
 
 	return 0;

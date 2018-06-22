@@ -1,0 +1,123 @@
+	std::ifstream infile(ifile); //open file 'ifile' in the same directory as your exe file.
+	std::string line; //create a string , similar to int or float
+	
+	if(!infile) {
+		cout << "Failed to open file: " << ifile << endl; //if fail to read the file, return
+	}
+	else {
+		cout << "Read input...";
+		
+		string s; //create a string s
+		while( std::getline(ifile,line) ) {
+			std::stringstream linestream(line); //stake the first word of the line
+			linestream >> s; //put the word in the string s
+			
+			//read number of gates
+			if ( s == "ngate" ){
+				linestream >> gaten;
+				cout << "Number of gate: " << gaten << endl;
+				gpuErrchk( cudaHostAlloc( (void**) &gatetemp_host, sizeof(int)*MAXGATESIZE*(blocktx*(1+gaten/blocktx)) , cudaHostAllocDefault) );
+				continue;
+			}
+
+			//read number of basic events
+			if ( s == "nbasicevents" ){
+				linestream >> eventn;
+				cout << "Number of event: " <<eventn << endl;
+				gpuErrchk( cudaHostAlloc( (void**) &beid_host, sizeof(int)*(blocktx*(1+eventn/blocktx)) , cudaHostAllocDefault) );
+				gpuErrchk( cudaHostAlloc( (void**) &beprob_host, sizeof(float)*(blocktx*(1+eventn/blocktx)) , cudaHostAllocDefault) );
+				continue;
+			}
+
+			//read if top to bottom algorithm must be run
+			if ( s == "Toptobottom" ){
+				linestream >> boolalpha >> toptobottom;
+				cout << "Top to bottom analysis: " << boolalpha << toptobottom << endl;
+				continue;
+			}
+
+			//read the number of MC trial to do
+			if ( s == "MonteCarlo" ){
+				linestream >> boolalpha >> montecarlo;
+				cout << "Monte Carlo analysis: " << boolalpha << montecarlo << endl;
+				continue;
+			}
+
+			//read the number of MC trial to do
+			if ( s == "ntrial" ){
+				linestream >> mctrial;
+				cout << "Number of trial: " << mctrial << endl;
+				continue;
+			}
+
+			//read the number of MC simulations to do
+			if ( s == "nsimulation" ){
+				linestream >> mcsimulation;
+				cout << "Number of simulation: " << mcsimulation << endl;
+				continue;
+			}
+
+			//read if the cut sets must be computed
+			if ( s == "Cutsets" ){
+				linestream >> boolalpha >> cutsets;
+				cout << "Cut sets analysis: " << boolalpha << cutsets << endl;
+				continue;
+			}
+
+			//read the input gate logic
+			if ( s == "%Gate_logic" ){
+				
+				int colcounter = 0;
+				for ( int linecounter = 0 ; linecounter < gaten ; linecounter++ ){
+					std::getline(infile,line);
+					std::stringstream linestream(line);
+
+					while ( linestream >> gatetemp_host[linecounter*MAXGATESIZE+colcounter] ) {
+						colcounter++;
+					}
+					colcounter = 0;
+				}
+
+				//debug
+				cout << "Input gates " << endl;
+				for ( int i = 0; i < gaten ; i++){
+					cout << "Line "<<i<<" :";
+					for ( int j = 0 ; j < MAXGATESIZE ; j++){
+						cout << " " << gatetemp_host[i*MAXGATESIZE+j];
+					}
+					cout << endl;
+				}
+				//debug
+
+				continue;
+			}
+
+			//read the input basic event
+			if ( s == "%Basic_events" ){
+
+				for ( int linecounter = 0 ; linecounter < eventn ; linecounter++ ){
+					std::getline(infile,line);
+					std::stringstream linestream(line);
+
+					linestream >> beid_host[linecounter];
+					linestream >> beprob_host[linecounter];
+				}
+				
+				//debug
+				cout << "Input basic events " << endl;
+				for ( int i = 0; i < eventn ; i++){
+					cout << "Line "<<i<<" :";
+					cout << " " << beid_host[i];
+					cout << " " << beprob_host[i];
+					cout << endl;
+				}
+				//debug
+
+
+				continue;
+			}
+			
+		}
+		cout << "DONE" << endl;
+	}	
+	
